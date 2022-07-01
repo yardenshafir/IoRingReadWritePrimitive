@@ -15,8 +15,8 @@
 #define HACKSYS_EVD_IOCTL_ARBITRARY_OVERWRITE             CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_NEITHER, FILE_ANY_ACCESS)
 #define HACKSYS_EVD_IOCTL_ARBITRARY_INCREMENT             CTL_CODE(FILE_DEVICE_UNKNOWN, 0x81C, METHOD_NEITHER, FILE_ANY_ACCESS)
 
-#define OUTPUT_FILE_NAME L"c:\\temp\\exploit_output.txt"
-#define INPUT_FILE_NAME L"c:\\temp\\exploit_input.txt"
+#define OUTPUT_PIPE_NAME L"\\\\.\\pipe\\IoRingExploitOutput"
+#define INPUT_PIPE_NAME L"\\\\.\\pipe\\IoRingExploitInput"
 #define KERNEL_READ_SIZE 0x1000
 
 EXTERN_C_START

