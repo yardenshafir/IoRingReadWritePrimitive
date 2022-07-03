@@ -477,9 +477,9 @@ IsMcBufferEntrySupported (
         return HRESULT_FROM_NT(status);
     }
     if ((versionInfo.dwMajorVersion < 10) ||
-        (versionInfo.dwBuildNumber < 22577))
+        (versionInfo.dwBuildNumber < 22557))
     {
-        printf("Exploit only availbale starting Windows 11 build 22577\n");
+        printf("Exploit only availbale starting Windows 11 build 22557\n");
         return S_FALSE;
     }
     if (versionInfo.dwBuildNumber >= 22610)
