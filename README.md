@@ -6,3 +6,4 @@ Writeup: https://windows-internals.com/one-i-o-ring-to-rule-them-all-a-full-read
 
 This PoC uses an arbitrary overwrite of the RegBuffers field of an I/O ring to point to a fake array of preregistered buffers that can be manipulated by an attacker. The fake buffers can point to kernel addresses, so the attacker can queue read and write operations that generate arbitrary reads and writes.
 By using named pipes instead of a file we can avoid leaving any traces for security tools to recognize.
+Current implementation reads a page from the NTOS data section and prints it out. This is done using a hard-coded offset so it might break inthe future.
